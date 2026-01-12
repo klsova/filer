@@ -3,9 +3,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
-import { jsPDF } from 'jspdf';
-import * as pdfjsLib from 'pdfjs-dist';
-
 import DragDrop from './DragDrop';
 import FileUpload from './Main';
 
@@ -16,15 +13,13 @@ export default function Home() {
   const [format, setFormat] = useState<string>('mp4');
   const [logs, setLogs] = useState<string>('Initializing...');
 
-  const ffmpegRef = useRef(new FFmpeg());
-
-  useEffect(() => {
-    if (typeof window !== 'undefined') {
-        pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
-    }
-  }, []);
+  const ffmpegRef = useRef<FFmpeg | null>(null);
 
   const load = async () => {
+    if (!ffmpegRef.current) {
+      ffmpegRef.current = new FFmpeg();
+    }
+    
     const ffmpeg = ffmpegRef.current;
 
     ffmpeg.on('log', ({ message }) => {
@@ -71,14 +66,14 @@ export default function Home() {
 
   const convertImageToPDF = async (file: File) => {
     try {
+      const { jsPDF } = (await import('jspdf'));
+
       const reader = new FileReader();
       reader.onload = (event) => {
         const imgData = event.target?.result as string;
         if (!imgData) return;
         
-        // p = portrait, mm = millimeters, a4 = format
         const pdf = new jsPDF('p', 'mm', 'a4');
-        
         const imgProps = pdf.getImageProperties(imgData);
         const pdfWidth = pdf.internal.pageSize.getWidth();
         const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
@@ -97,9 +92,12 @@ export default function Home() {
 
   const convertPdfToImage = async (file: File) => {
     try {
+      const pdfjsLib = await import('pdfjs-dist');
+      pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+
       const arrayBuffer = await file.arrayBuffer();
       const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
-      const page = await pdf.getPage(1); // Get first page
+      const page = await pdf.getPage(1);
 
       const viewport = page.getViewport({ scale: 2.0 });
       const canvas = document.createElement('canvas');
@@ -140,6 +138,8 @@ export default function Home() {
 
   const convertWithFFmpeg = async (file: File) => {
     const ffmpeg = ffmpegRef.current;
+    if (!ffmpeg) return;
+
     const inputName = 'input.' + file.name.split('.').pop();
     const outputName = `output.${format}`;
 
