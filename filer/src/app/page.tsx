@@ -3,6 +3,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
 import { fetchFile, toBlobURL } from '@ffmpeg/util';
+import { jsPDF } from 'jspdf';
+import * as pdfjsLib from 'pdfjs-dist';
+
 import DragDrop from './DragDrop';
 import FileUpload from './Main';
 
@@ -11,35 +14,45 @@ export default function Home() {
   const [isLoading, setIsLoading] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
   const [format, setFormat] = useState<string>('mp4');
+  const [logs, setLogs] = useState<string>('Initializing...');
+
   const ffmpegRef = useRef(new FFmpeg());
-  const messageRef = useRef<HTMLParagraphElement | null>(null);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+        pdfjsLib.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+    }
+  }, []);
 
   const load = async () => {
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd';
     const ffmpeg = ffmpegRef.current;
-    
-    // Log progress
+
     ffmpeg.on('log', ({ message }) => {
-      if (messageRef.current) messageRef.current.innerHTML = message;
+      setLogs(message);
       console.log(message);
     });
 
     try {
+      const baseURL = window.location.origin + '/ffmpeg';
       await ffmpeg.load({
         coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
         wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
       });
       setLoaded(true);
+      setLogs('Ready to convert');
     } catch (error) {
       console.error('Failed to load FFmpeg:', error);
+      setLogs('Failed to load FFmpeg core. Check public/ffmpeg folder.');
     }
   };
 
   useEffect(() => {
-    load();
+    if (typeof window !== 'undefined') {
+      load();
+    }
   }, []);
 
-  const getMimeType = (format: string) => {
+  const getMimeType = (fmt: string) => {
     const mimeTypes: Record<string, string> = {
       mp4: 'video/mp4',
       mkv: 'video/x-matroska',
@@ -48,10 +61,106 @@ export default function Home() {
       wav: 'audio/wav',
       png: 'image/png',
       jpg: 'image/jpeg',
-      pdf: 'application/pdf',
+      jpeg: 'image/jpeg',
+      webp: 'image/webp',
       gif: 'image/gif',
+      pdf: 'application/pdf',
     };
-    return mimeTypes[format] || `video/${format}`;
+    return mimeTypes[fmt] || `video/${fmt}`;
+  };
+
+  const convertImageToPDF = async (file: File) => {
+    try {
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        const imgData = event.target?.result as string;
+        if (!imgData) return;
+        
+        // p = portrait, mm = millimeters, a4 = format
+        const pdf = new jsPDF('p', 'mm', 'a4');
+        
+        const imgProps = pdf.getImageProperties(imgData);
+        const pdfWidth = pdf.internal.pageSize.getWidth();
+        const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+        
+        pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidth, pdfHeight);
+        pdf.save('output.pdf');
+        setIsLoading(false);
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error(error);
+      alert('PDF conversion failed');
+      setIsLoading(false);
+    }
+  };
+
+  const convertPdfToImage = async (file: File) => {
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument(arrayBuffer).promise;
+      const page = await pdf.getPage(1); // Get first page
+
+      const viewport = page.getViewport({ scale: 2.0 });
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      
+      if (!context) throw new Error('Canvas context missing');
+
+      canvas.height = viewport.height;
+      canvas.width = viewport.width;
+
+      const renderContext: any = {
+        canvasContext: context,
+        viewport: viewport,
+      };
+
+      await page.render(renderContext).promise;
+
+      canvas.toBlob((blob) => {
+        if (!blob) {
+            alert('Failed to generate image');
+            setIsLoading(false);
+            return;
+        }
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `page_1.${format === 'jpeg' ? 'jpg' : format}`;
+        a.click();
+        setIsLoading(false);
+      }, getMimeType(format));
+
+    } catch (error) {
+      console.error('PDF to Image failed', error);
+      alert('Failed to convert PDF. See console.');
+      setIsLoading(false);
+    }
+  };
+
+  const convertWithFFmpeg = async (file: File) => {
+    const ffmpeg = ffmpegRef.current;
+    const inputName = 'input.' + file.name.split('.').pop();
+    const outputName = `output.${format}`;
+
+    try {
+      await ffmpeg.writeFile(inputName, await fetchFile(file));
+      await ffmpeg.exec(['-i', inputName, outputName]);
+      const data = await ffmpeg.readFile(outputName);
+      
+      const blob = new Blob([data as any], { type: getMimeType(format) });
+      const url = URL.createObjectURL(blob);
+
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = outputName;
+      a.click();
+    } catch (error) {
+      console.error(error);
+      alert('FFmpeg conversion failed. Check console.');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const convert = async () => {
@@ -62,32 +171,17 @@ export default function Home() {
     }
 
     setIsLoading(true);
-    const ffmpeg = ffmpegRef.current;
-    const inputFile = files[0]; // Assuming single file for now
-    const inputName = inputFile.name;
-    const outputName = `output.${format}`;
-
-    try {
-      await ffmpeg.writeFile(inputName, await fetchFile(inputFile));
-
-
-      await ffmpeg.exec(['-i', inputName, outputName]);
-
-      const data = await ffmpeg.readFile(outputName);
-
-      const url = URL.createObjectURL(
-        new Blob([data as any], { type: getMimeType(format) })
-      );
-      
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = outputName;
-      a.click();
-    } catch (error) {
-      console.error('Conversion failed', error);
-      alert('Conversion failed. Check console for details.');
-    } finally {
-      setIsLoading(false);
+    const inputFile = files[0];
+    const inputExtension = inputFile.name.split('.').pop()?.toLowerCase();
+    
+    if (format === 'pdf' && inputFile.type.startsWith('image/')) {
+       await convertImageToPDF(inputFile);
+    } 
+    else if (inputExtension === 'pdf' && ['jpg', 'jpeg', 'png', 'webp'].includes(format)) {
+       await convertPdfToImage(inputFile);
+    }
+    else {
+       await convertWithFFmpeg(inputFile);
     }
   };
 
@@ -98,7 +192,12 @@ export default function Home() {
       </header>
       
       <div className="flex flex-col items-center space-y-4 mt-4 w-full">
-        {!loaded && <p className="text-red-500">Loading FFmpeg core...</p>}
+        {!loaded && (
+          <div className="flex items-center space-x-2 text-red-500">
+             <span className="loading loading-spinner"></span> 
+             <p>Loading Core...</p>
+          </div>
+        )}
         
         <FileUpload 
           format={format} 
@@ -109,7 +208,9 @@ export default function Home() {
         
         <DragDrop files={files} setFiles={setFiles} />
         
-        <p ref={messageRef} className="text-xs text-gray-500 font-mono mt-2 h-6 overflow-hidden"></p>
+        <p className="text-xs text-gray-500 font-mono mt-2 h-6 overflow-hidden w-full text-center">
+          {logs}
+        </p>
       </div>
 
       <h1>Filer: The file converter</h1>
